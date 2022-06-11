@@ -1,0 +1,1 @@
+/home/marco/Escritorio/TEC/Sistemas\ Operativos/Proyecto\ 2/proyecto2-sistemas-operativos/qrfs/target/debug/qrfs: /home/marco/Escritorio/TEC/Sistemas\ Operativos/Proyecto\ 2/proyecto2-sistemas-operativos/qrfs/src/main.rs
