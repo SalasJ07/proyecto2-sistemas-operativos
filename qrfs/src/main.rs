@@ -1,153 +1,855 @@
-extern crate time;
+#![allow(unused_must_use)]
+#![allow(unused_imports)]
+#![allow(dead_code)]
 
+use std::str;
+use std::mem;
 use std::env;
 use std::ffi::OsStr;
-use libc::{ENOENT, getuid, getgid};
-use fuse::{FileType, FileAttr, Filesystem, Request, ReplyData, ReplyEntry, ReplyAttr, ReplyDirectory};
-use time::Timespec;
+use std::fs::File;
+use std::io::prelude::*;
+use std::path::Path;
+use fuse::{Filesystem, Request, ReplyCreate, ReplyEmpty, ReplyAttr, ReplyEntry, ReplyOpen, ReplyData, ReplyDirectory, ReplyWrite, FileType, FileAttr};
 use time::get_time;
+use time::Timespec;
+use libc::{getuid, getgid, ENOSYS, ENOENT, EIO, EISDIR, ENOSPC};
+use serde::{Serialize, Deserialize};
+use bincode::{serialize, deserialize};
 
-const TTL: Timespec = Timespec { sec: 1, nsec: 0 };		         
+/*
+    Estructura fundamental que nos sirve para administrar los archivos
+*/
+struct Disk {
+    super_block: Vec<Option<Inode>>,
+    memory_blocks: Vec<MemoryBlock>,
+    max_files: usize,
+    block_size: usize,
+    root_path: String
+}
 
-static mut DIRECTIONS_ATTRIBUTES: Vec<(String, FileAttr)> = Vec::new();
-static mut FILE_CONTENTS: Vec<&str> = Vec::new();
-static mut FILE_ATTRIBUTES: Vec<(String, FileAttr)> = Vec::new();
+impl Disk {
+    /*
+        Función que permite la creación de un disco
+        E: el path raíz, tamaño de la memoria, tamaño del bloque
+        S: un nuevo Disk
+    */
+    fn new(root_path: String, memory_size: usize, block_size: usize) -> Disk{
+        let memory_quantity: usize = (memory_size / block_size) - 1;
+        let inode_size = mem::size_of::<Vec<Inode>>() + mem::size_of::<Inode>();
+        let max_files = block_size / inode_size;
 
-struct HelloFS;
+        let disk_path = format!("{}/.disco.qrfs", &root_path);
+        let table_path = format!("{}/.table.qrfs", &root_path);
 
-impl Filesystem for HelloFS {
-    fn lookup(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        if parent == 1 && name.to_str() == Some("Hello.txt") {
-            reply.entry(&TTL, unsafe{&FILE_ATTRIBUTES.get(0).unwrap().1}, 0);
-        } else {
-            reply.error(ENOENT);
-        }
-    }
+        let mut memory_blocks: Vec<MemoryBlock>;
+        let mut super_block: Vec<Option<Inode>>;
 
-    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
-        println!("operation getattr");
-        match ino {
-            1 => reply.attr(&TTL, unsafe{&DIRECTIONS_ATTRIBUTES.get(0).unwrap().1}),
-            2 => reply.attr(&TTL, unsafe{&FILE_ATTRIBUTES.get(0).unwrap().1}),
-            3 => reply.attr(&TTL, unsafe{&DIRECTIONS_ATTRIBUTES.get(1).unwrap().1}),
-            _ => reply.error(ENOENT),
-        }
-    }
+        File::create(disk_path).expect("Error a la hora de crear el disco");
+        File::create(table_path).expect("Error a la hora de crear la tabla");
 
-    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, _size: u32, reply: ReplyData) {
-        println!("operation read");
-        if ino == 2 {
-            reply.data(unsafe{&FILE_CONTENTS.get(0).unwrap().as_bytes()[offset as usize..]});
-        } else {
-            reply.error(ENOENT);
-        }
-    }
+        super_block = Vec::new();
+        memory_blocks = Vec::new();
 
-    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
-        println!("operation readdir");
-        if ino != 1 {
-            reply.error(ENOENT);
-            return;
-        }
-
-        let mut entries = vec![
-            (1, FileType::Directory, "."),
-            (1, FileType::Directory, "..")
-        ];
-
-        unsafe {
-            for directory in DIRECTIONS_ATTRIBUTES.iter() {
-                if &directory.0 != "/" {
-                    entries.push((2, directory.1.kind, &directory.0));
-                }
-            }
-
-            for file in FILE_ATTRIBUTES.iter() {
-                entries.push((2, file.1.kind, &file.0));
-            }
-        }
-
-        for (i, entry) in entries.into_iter().enumerate().skip(offset as usize) {
-            // i + 1 means the index of the next entry
-            reply.add(entry.0, (i + 1) as i64, entry.1, entry.2);
-        }
-        reply.ok();
-    }
-
-    fn mkdir(&mut self, _req: &Request, _parent: u64, _name: &OsStr, _mode: u32, reply: ReplyEntry) {
-        let create_time = get_time();
-        let new_dir: FileAttr = FileAttr {
-            ino: 3,
-            size: 512,
+        let ttl:Timespec = get_time();
+        let attributes = FileAttr {
+            ino: 1,
+            size: 0,
             blocks: 0,
-            atime: create_time,                                  // 1970-01-01 00:00:00
-            mtime: create_time,
-            ctime: create_time,
-            crtime: create_time,
+            atime: ttl,
+            mtime: ttl,
+            ctime: ttl,
+            crtime: ttl,
             kind: FileType::Directory,
-            perm: 0o644,
-            nlink: 2,
+            perm: 0o755,
+            nlink: 0,
             uid: unsafe{getuid()},
             gid: unsafe{getgid()},
             rdev: 0,
-            flags: 0,
+            flags: 0
         };
 
-        let name_dir = _name.to_str().unwrap().to_owned();
-        unsafe{DIRECTIONS_ATTRIBUTES.push((name_dir, new_dir));}
+        let name:String = String::from(".");
 
-        reply.entry(&TTL, &new_dir, 0);
+        let root_inode = Inode {
+            name,
+            attributes,
+            references: vec![Option::None; 64]
+        };
+
+        super_block.push(Some(root_inode));
+
+        //Inicializar los demás campos en NONE
+
+        for _ in super_block.len()..max_files {
+            super_block.push(Option::None);
+        }
+
+        for _ in memory_blocks.len()..memory_quantity {
+            memory_blocks.push(MemoryBlock { data: Option::None });
+        }
+
+        println!("Disco Inicializado Correctamente");
+
+        Disk { 
+            super_block, 
+            memory_blocks, 
+            max_files, 
+            block_size, 
+            root_path 
+        }
+
+    }
+
+    /*
+        Función que encuentra el siguiente ino que esté vacío = None
+        E: N/A
+        S: un opcional del índice al siguiente ino
+    */
+    fn find_next_ino(&self) -> Option<u64>{
+        for i in 0..self.super_block.len() - 1 {
+            if let Option::None = self.super_block[i] {
+                let ino = (i as u64) + 1;
+                return Option::Some(ino);
+            }
+        }
+
+        Option::None
+    }
+
+    /*
+        Función que encuentra un memory block vacío
+        E: N/A
+        S: un opcional de índice al memory block vacío
+    */
+    fn find_empty_memory_block(&self) -> Option<usize> {
+        for i in 0..self.memory_blocks.len() - 1 {
+            if let Option::None = self.memory_blocks[i].data {
+                return Option::Some(i);
+            }
+        }
+
+        Option::None
+    }
+
+    /*
+        Función que encuentra una referencia vacío dentro de un inode
+        E: ino (identificador del inode)
+        S: un opcional de índice al espacio vacío de la referencia
+    */
+    fn find_empty_reference(&self, ino:u64) -> Option<usize> {
+        let position = (ino as usize) - 1;
+
+        match &self.super_block[position] {
+            Some(inode) => inode.references.iter().position(|i| i == &None),
+            None => panic!("Espacio de memoria inválido")
+        }
+    }
+
+    /*
+        Función que guarda un nuevo inode en el super block
+        E: inode que se desea guardar
+        S: N/A
+    */
+    fn write_inode(&mut self, inode: Inode) {
+        if mem::size_of_val(&inode) > self.block_size {
+            println!("Error: Tamaño del Inode es incorrecto");
+            return ;
+        }
+
+        let position = (inode.attributes.ino - 1) as usize;
+        self.super_block[position] = Some(inode);
+    }
+    
+    /*
+        Función que elimina un inode del superblock
+        E: ino (identificador del inode)
+        S: N/A
+    */
+    fn remove_inode(&mut self, ino: u64) {
+        let position = (ino - 1) as usize;
+        self.super_block[position] = None;
+    }
+
+    /*
+        Función que elimina una referencia dentro del inode
+        E: ino (identificador del inode) y reference (identificador del inode referenciado)
+        S: N/A
+    */
+    fn remove_reference(&mut self, ino: u64, reference: usize) {
+        let position = (ino - 1) as usize;
+        let inode: &mut Option<Inode> = &mut self.super_block[position];
+
+        match inode {
+            Some(inode) => {
+                let mut reference_position: Option<usize> = Option::None;
+
+                for i in 0..inode.references.len() {
+                    if inode.references[i].unwrap() == reference {
+                        reference_position = Some(i);
+                        break;
+                    }
+                }
+
+                match reference_position {
+                    Some(refer) => inode.references[refer] = None,
+                    None => panic!("Error: referencia no encontrada")
+                }
+            },
+            None => panic!("Error: Inode no existe en el contexto actual")
+        }
+    }
+
+    /*
+        Función que regresa el inode solicitado pero mutable
+        E: ino (identificador del inode)
+        S: un opcional del inode solicitado mutable
+    */
+    fn get_inode_mutable(&mut self, ino: u64) -> Option<&mut Inode> {
+        let position = (ino as usize) - 1;
+
+        match &mut self.super_block[position] {
+            Some(inode) => Some(inode),
+            None => None
+        }
+    }
+
+    /*
+        Función que regresa el inode solicitado
+        E: ino (identificador del inode)
+        S: un opcional del inode solicitado
+    */
+    fn get_inode(&self, ino: u64) -> Option<&Inode> {
+        let position = (ino as usize) - 1;
+
+        match &self.super_block[position] {
+            Some(inode) => Some(inode),
+            None => None
+        }
+    }
+
+    /*
+        Función que encuentra un inode por el nombre
+        E: parent_ino (identificador del inode padre) y name (nombre del archivo o carpeta)
+        S: un opcional del inode solicitado
+    */
+    fn find_inode_name(&self, parent_ino: u64, name: &str) -> Option<&Inode> {
+        let position = (parent_ino as usize) - 1;
+        let parent_inode = &self.super_block[position];
+
+        match parent_inode {
+            Some(parent_inode) => {
+                for referenced_inode in parent_inode.references.iter(){
+                    if let Some(ino) = referenced_inode {
+                        let position = (ino.clone() as usize) - 1;
+                        let reference = &self.super_block[position];
+
+                        match reference {
+                            Some(inode) => {
+                                let name_inode:&str = inode.name.as_str();
+                                let requested_name = name.trim();
+                                
+                                if name_inode == requested_name {
+                                    return Some(inode);
+                                }
+                            },
+                            None => panic!("Error: No se encontró el inode")
+                        }
+                    }
+                }
+            },
+            None => panic!("Error: No se encontró el inode parent")
+        }
+
+        return None;
+    }
+
+    /*
+        Función que regresa las referencias de un inode
+        E: ino (identificador del inode)
+        S: un opcional de las referencias del inode
+    */
+    fn get_references(&self, ino: u64) -> &Vec<Option<usize>> {
+        let position = (ino as usize) - 1;
+
+        match &self.super_block[position] {
+            Some(inode) => &inode.references,
+            None => panic!("Error: No se encontró el inode para referencias")
+        }
+    }
+
+    /*
+        Función que regresa los bytes del contenido de un memory block
+        E: block_position (la ubicación del bloque solicitado)
+        S: un opcional del contenido del memory block como bytes
+    */
+    fn get_content_bytes(&self, block_position: usize) -> &Option<Vec<u8>> {
+        let memory_block = &self.memory_blocks[block_position];
+        return &memory_block.data;
+    }
+
+    /*
+        Función que guarda el contenido en un memory block
+        E: block_position (la ubicación del bloque solicitado) y el contenido (bytes)
+        S: N/A
+    */
+    fn write_content_bytes(&mut self, block_position: usize, content: Vec<u8>) {
+        if content.len() > self.block_size {
+            panic!("Error: el contenido es muy grande");
+        }
+
+        let memory_block = MemoryBlock{ data: Some(content)};
+        self.memory_blocks[block_position] = memory_block;
+    }
+
+    /*
+        Función que guardan una referencia en un inode
+        E: ino (identificador del inode), reference (ubicación de la referencia) y value (ino de la referencia)
+        S: N/A
+    */
+    fn write_reference(&mut self, ino: u64, reference: usize, value: usize) {
+        let position = (ino as usize) - 1;
+        match &mut self.super_block[position] {
+            Some(inode) => {
+                inode.references[reference] = Some(value)
+            },
+            None => panic!("Error: no se encontro el inode para insertar la referencia")
+        }
+    }
+
+    /*
+        Función que codifica un inode
+        E: inode (inode a codificar)
+        S: un arreglo de bytes (un inode codificado)
+    */
+    fn encode_inode(&self, inode: &Inode) -> Vec<u8> {
+        serialize(inode).unwrap()
+    }
+
+    /*
+        Función que codifica todos los inodes del disco
+        E: N/A
+        S: un arreglo de arreglos de bytes (todos los inodes codificado)
+    */
+    fn encode_inodes(&self) -> Vec<Vec<u8>> {
+        let mut result: Vec<Vec<u8>> = Vec::new();
+        
+        for inode in self.super_block.iter() {
+            match inode {
+                Some(inode) => {
+                    result.push(self.encode_inode(inode));
+                },
+                None => panic!("Error: no se pudo codificar los inodes")
+            }
+        }
+
+        result
+    }
+
+    /*
+        Función que decodifica un inode
+        E: inode (arreglo de bytes => inode codificado)
+        S: un inode (un inode decodificado)
+    */
+    fn decode_inode(&self, inode: &Vec<u8>) -> Inode {
+        deserialize(&inode[..]).unwrap()
+    }
+
+    /*
+        Función que decodifica todos los inodes
+        E: todos los inodes(un arreglo de arreglos de bytes => inodes codificados)
+        S: un arreglo de inodes decodificados
+    */
+    fn decode_inodes(&self, inodes: Vec<Vec<u8>>) -> Vec<Inode> {
+        let mut result: Vec<Inode> = Vec::new();
+        
+        for inode in inodes.iter() {
+            result.push(self.decode_inode(inode));
+        }
+
+        result
+    }
+}
+
+
+#[derive(Serialize, Deserialize)]
+struct Inode {
+    name: String,
+    #[serde(with = "FileAttrDef")]
+    attributes: FileAttr,
+    references: Vec<Option<usize>>
+}
+
+#[derive(Serialize, Deserialize)]
+struct MemoryBlock {
+    data: Option<Vec<u8>>
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "Timespec")]
+pub struct TimespecDef {
+    pub sec: i64,
+    pub nsec: i32,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "FileType")]
+pub enum FileTypeDef {
+    NamedPipe,
+    CharDevice,
+    BlockDevice,
+    Directory,
+    RegularFile,
+    Symlink,
+    Socket,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "FileAttr")]
+pub struct FileAttrDef {
+    pub ino: u64,
+    pub size: u64,
+    pub blocks: u64,
+    #[serde(with = "TimespecDef")]
+    pub atime: Timespec,
+    #[serde(with = "TimespecDef")]
+    pub mtime: Timespec,
+    #[serde(with = "TimespecDef")]
+    pub ctime: Timespec,
+    #[serde(with = "TimespecDef")]
+    pub crtime: Timespec,
+    #[serde(with = "FileTypeDef")]
+    pub kind: FileType,
+    pub perm: u16,
+    pub nlink: u32,
+    pub uid: u32,
+    pub gid: u32,
+    pub rdev: u32,
+    pub flags: u32,
+}
+
+/*
+    Estructura del filesystem
+*/
+struct QRFS {
+    disk: Disk
+}
+
+impl QRFS {
+    /*
+        Función que crea un nuevo QRFS
+        E: el path raíz
+        S: una estructura QRFS
+    */
+    fn new(root_path: String) -> Self {
+        let max_files: usize = 1024;
+        let memory_size: usize = 1024 * 1024 * 1024;
+        let block_size: usize = max_files * (mem::size_of::<Vec<Inode>>() + mem::size_of::<Inode>());
+
+        let disk = Disk::new(root_path, memory_size, block_size);
+
+        QRFS { disk }
+    }
+}
+
+impl Filesystem for QRFS {
+    /*
+        Función lookup del filesystem
+        
+        sirve para detectar los archivos o carpetas pertenecientes del fs
+    */
+    fn lookup(&mut self, _req: &Request, parent: u64, name: &std::ffi::OsStr, reply: ReplyEntry) {
+        println!("Operation: lookup");
+
+        let inode = self.disk.find_inode_name(parent, name.to_str().unwrap());
+
+        match inode {
+            Some(inode) => {
+                let ttl = get_time();
+                reply.entry(&ttl, &inode.attributes, 0);
+            },
+            None => reply.error(ENOENT)
+        }
+    }
+
+    /*
+        Función getattr del filesystem
+        
+        sirve para obtener los atributos de un archivo o carpeta
+    */
+    fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
+        println!("Operation: getattr");
+
+        match self.disk.get_inode(ino) {
+            Some(inode) => {
+                let ttl = get_time();
+                reply.attr(&ttl, &inode.attributes);
+            },
+            None => reply.error(ENOENT)
+        }
+    }
+
+    /*
+        Función read del filesystem
+        
+        sirve para leer el contenido de un archivo del fs
+    */
+    fn read(&mut self, _req: &Request, ino: u64, _fh: u64, _offset: i64, _size: u32, reply: ReplyData) {
+        println!("Operation: read");
+
+        let memory_block = self.disk.get_content_bytes((ino - 1)  as usize);
+    
+        match memory_block {
+            Some(memory_block) => {
+                reply.data(memory_block)
+            },
+            None => reply.error(EIO)
+        }
+    }
+
+    /*
+        Función readdir del filesystem
+        
+        sirve para detectar los directorios del fs
+    */
+    fn readdir(&mut self, _req: &Request, ino: u64, _fh: u64, offset: i64, mut reply: ReplyDirectory) {
+        println!("Operation: readdir");
+
+        if ino == 1 {
+            if offset == 0 {
+                reply.add(1, 0, FileType::Directory, ".");
+                reply.add(1, 1, FileType::Directory, "..");
+            }
+        }
+
+        let inode: Option<&Inode> = self.disk.get_inode(ino);
+
+        if mem::size_of_val(&inode) == offset as usize {
+            reply.ok();
+            return;
+        }
+
+        match inode {
+            Some(inode) => {
+                let references = &inode.references;
+
+                for ino in references.iter() {
+                    if let Some(ino) = ino {
+                        let inode = self.disk.get_inode(*ino as u64);
+
+                        if let Some(data) = inode {
+                            if data.attributes.ino == 1 {
+                                continue;
+                            }
+
+                            let name = data.name.clone();
+                            let offset = mem::size_of_val(&inode) as i64;
+                            reply.add(data.attributes.ino, offset, data.attributes.kind, name);
+                        }
+                    }
+                }
+                reply.ok();
+            },
+            None => reply.error(ENOENT)
+        }
+    }
+
+    /*
+        Función mkdir del filesystem
+        
+        sirve para crear una nueva carpeta en el fs
+    */
+    fn mkdir(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, reply: ReplyEntry) {
+        println!("Operation: mkdir");
+
+        let reference_position = self.disk.find_empty_reference(parent);
+
+        match reference_position {
+            Some(position) => {
+                let ino = self.disk.find_next_ino();
+
+                match ino {
+                    Some(ino) => {
+                        let ttl = get_time();
+                        let attributes = FileAttr {
+                            ino: ino as u64,
+                            size: 0,
+                            blocks: 1,
+                            atime: ttl,
+                            mtime: ttl,
+                            ctime: ttl,
+                            crtime: ttl,
+                            kind: FileType::Directory,
+                            perm: 0o755,
+                            nlink: 0,
+                            uid: unsafe {getuid()},
+                            gid: unsafe {getgid()},
+                            rdev: 0,
+                            flags: 0
+                        };
+
+                        let name:String = name.to_str().unwrap().to_owned();
+
+                        let inode = Inode {
+                            name,
+                            attributes,
+                            references: vec![Option::None; 64]
+                        };
+
+                        self.disk.write_inode(inode);
+                        self.disk.write_reference(parent, position, ino as usize);
+
+                        reply.entry(&ttl, &attributes, 0);
+
+                    },
+                    None => reply.error(ENOSPC)
+                }
+            },
+            None => println!("Disco lleno")
+        }
+    }
+
+    /*
+        Función create del filesystem
+        
+        sirve para crear un nuevo archivo en el fs
+    */
+    fn create(&mut self, _req: &Request, parent: u64, name: &OsStr, _mode: u32, flags: u32, reply: ReplyCreate) {
+        println!("Operation: create");
+
+        let reference_position = self.disk.find_empty_reference(parent);
+
+        if reference_position == None {
+            println!("Error: No es posible crear más archivos");
+            reply.error(EIO);
+            return ;
+        }
+
+        let next_ino = self.disk.find_next_ino();
+        let memory_block = self.disk.find_empty_memory_block();
+
+        if next_ino == None || memory_block == None {
+            println!("Error: No queda espacio disponible");
+            reply.error(ENOSPC);
+            return ;
+        }
+
+        let next_ino = next_ino.unwrap();
+        let memory_block = memory_block.unwrap();
+
+        let ttl = get_time();
+
+        let attributes = FileAttr {
+            ino: next_ino,
+            size: 0,
+            blocks: 1,
+            atime: ttl,
+            mtime: ttl,
+            ctime: ttl,
+            crtime: ttl,
+            kind: FileType::RegularFile,
+            perm: 0o755,
+            nlink: 0,
+            uid: unsafe {getuid()},
+            gid: unsafe {getgid()},
+            rdev: 0,
+            flags
+        };
+
+        let name = name.to_str().unwrap().to_owned();
+
+        let mut inode = Inode {
+            name,
+            attributes,
+            references: vec![Option::None; 64]
+        };
+
+        inode.references[0] = Some(memory_block);
+        let content: Vec<u8> = Vec::default();
+
+        self.disk.write_inode(inode);
+        self.disk.write_content_bytes(memory_block, content);
+
+        let reference_position = reference_position.unwrap();
+        self.disk.write_reference(parent, reference_position, next_ino as usize);
+        
+        reply.created(&ttl, &attributes, 1, next_ino, flags);
+    }
+
+    /*
+        Función open del filesystem
+        
+        sirve para abrir un archivo del fs
+    */
+    fn open(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
+        println!("Operation: open");
+
+        let inode = self.disk.get_inode(ino);
+
+        match inode {
+            Some(_) => reply.opened(ino, flags),
+            None => reply.error(ENOSYS)
+        }
+    }
+    
+    /*
+        Función write del filesystem
+        
+        sirve para escribir dentro de un archivo del fs
+    */
+    fn write(&mut self, _req: &Request, ino: u64, _fh: u64, _offset: i64, data: &[u8], _flags: u32, reply: ReplyWrite) {
+        println!("Operation: write");
+
+        let inode = self.disk.get_inode_mutable(ino);
+        let content: Vec<u8> = data.to_vec();
+
+        match inode {
+            Some(inode) => {
+                inode.attributes.size = data.len() as u64;
+
+                let position = (ino as usize) - 1;
+
+                self.disk.write_content_bytes(position, content);
+                reply.written(data.len() as u32);
+            },
+            None => {
+                println!("Error: No se encontró el inode");
+                reply.error(ENOENT);
+            }
+        }
+    }
+
+    /*
+        Función rmdir del filesystem
+        
+        sirve para eliminar una carpeta del fs
+    */
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let name = name.to_str().unwrap();
+        let inode = self.disk.find_inode_name(parent, name);
+        
+        match inode {
+            Some(inode) => {
+                let ino = inode.attributes.ino;
+                self.disk.remove_reference(parent, ino as usize);
+                self.disk.remove_inode(ino);
+
+                reply.ok();
+            },
+            None => reply.error(EIO)
+        }
+    }
+
+    /*
+        Función statfs del filesystem
+        
+        sirve para desplegar las estadísticas del fs
+    */
+    fn statfs(&mut self, _req: &Request, _ino: u64, reply: fuse::ReplyStatfs) {
+        println!("Operation: statfs");
+
+        let blocks = self.disk.memory_blocks.len();
+        let bfree = blocks - (self.disk.find_empty_memory_block().unwrap());
+        let bavail = bfree;
+        let bsize = self.disk.block_size;
+        let files = self.disk.find_empty_memory_block().unwrap();
+        let namelen = 64;
+        let ffree = self.disk.max_files - files;
+        let frsize = 1;
+
+        reply.statfs(
+            blocks as u64, 
+            bfree as u64, 
+            bavail as u64, 
+            files as u64, 
+            ffree as u64, 
+            bsize as u32, 
+            namelen, 
+            frsize);
+    }
+
+    /*
+        Función rename del filesystem
+        
+        sirve para renombrar o editar un archivo del fs
+    */
+    fn rename(&mut self, _req: &Request, parent: u64, name: &OsStr, _newparent: u64, newname: &OsStr, reply: ReplyEmpty) {
+        println!("Operation: rename");
+
+        let name = name.to_str().unwrap();
+        let inode = self.disk.find_inode_name(parent, name);
+
+        match inode {
+            Some(inode) => {
+                let ino = inode.attributes.ino;
+                let new_inode = self.disk.get_inode_mutable(ino);
+                
+                match new_inode {
+                    Some(inode) => {
+                        let newname = newname.to_str().unwrap().to_owned();
+                        inode.name = newname;
+                        reply.ok();
+                    },
+                    None => panic!("Error: No se pudo renombrar el archivo")
+                }
+            },
+            None => reply.error(ENOENT)
+        }
+    }
+
+    /*
+        Función access del filesystem
+        
+        sirve para checar por los permisos de un archivo de fs
+    */
+    fn access(&mut self, _req: &Request, _ino: u64, _mask: u32, reply: ReplyEmpty) {
+        println!("Operation: access");
+        reply.ok();
+    }
+
+    /*
+        Función fsync del filesystem
+        
+        sirve para sincronizar los archivos del fs
+    */
+    fn fsync(&mut self, _req: &Request, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
+        println!("Operation: fsync)");
+        reply.error(ENOSYS);
+    }
+
+    /*
+        Función opendir del filesystem
+        
+        sirve para abrir una carpeta del fs
+    */
+    fn opendir(&mut self, _req: &Request, ino: u64, flags: u32, reply: ReplyOpen) {
+        println!("Operation: opendir");
+        
+        let inode = self.disk.get_inode(ino);
+
+        match inode {
+            Some(inode) => reply.opened(inode.attributes.ino, flags),
+            None => reply.error(EISDIR)
+        }
     }
 }
 
 fn main() {
-    let create_time = get_time();
-
-    let hello_dir: FileAttr = FileAttr {
-        ino: 1,
-        size: 0,
-        blocks: 0,
-        atime: create_time,                                  // 1970-01-01 00:00:00
-        mtime: create_time,
-        ctime: create_time,
-        crtime: create_time,
-        kind: FileType::Directory,
-        perm: 0o755,
-        nlink: 2,
-        uid: unsafe{getuid()},
-        gid: unsafe{getgid()},
-        rdev: 0,
-        flags: 0,
+    let mountpoint = match env::args().nth(1) {
+        Some(path) => path,
+        None => {
+            println!("Error: se debe ingresar un mountpoint");
+            return ;
+        }
     };
 
-    unsafe{DIRECTIONS_ATTRIBUTES.push((String::from("/") ,hello_dir));}
+    let fs = QRFS::new(mountpoint.clone());
 
-    let hello_content: &str = "Hello World!\n";
-
-    unsafe{FILE_CONTENTS.push(hello_content);}
-
-    let hello_attr: FileAttr = FileAttr {
-        ino: 2,
-        size: 13,
-        blocks: 1,
-        atime: create_time,                                  // 1970-01-01 00:00:00
-        mtime: create_time,
-        ctime: create_time,
-        crtime: create_time,
-        kind: FileType::RegularFile,
-        perm: 0o644,
-        nlink: 1,
-        uid: unsafe{getuid()},
-        gid: unsafe{getgid()},
-        rdev: 0,
-        flags: 0,
-    };
-
-    unsafe{FILE_ATTRIBUTES.push((String::from("Hello.txt"), hello_attr));}
+    let options = ["-o", "nonempty"]
+        .iter()
+        .map(|o| o.as_ref())
+        .collect::<Vec<&OsStr>>();
     
-    env_logger::init();
-    let mountpoint = env::args_os().nth(1).unwrap();
-    fuse::mount(HelloFS, &mountpoint, &Vec::new()).unwrap();
-    //cargo run path (it must be empty)
-    //cargo run /home/kzumbado/Documents/proyecto2-sistemas-operativos/qrfs/tmp
+    println!("QRFS iniciado");
+    
+    fuse::mount(fs, &mountpoint, &options);
 }
