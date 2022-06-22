@@ -1,20 +1,26 @@
 #![allow(unused_must_use)]
-#![allow(unused_imports)]
 #![allow(dead_code)]
 
 use std::str;
 use std::mem;
 use std::env;
 use std::ffi::OsStr;
-use std::fs::File;
-use std::io::prelude::*;
-use std::path::Path;
 use fuse::{Filesystem, Request, ReplyCreate, ReplyEmpty, ReplyAttr, ReplyEntry, ReplyOpen, ReplyData, ReplyDirectory, ReplyWrite, FileType, FileAttr};
 use time::get_time;
 use time::Timespec;
 use libc::{getuid, getgid, ENOSYS, ENOENT, EIO, EISDIR, ENOSPC};
 use serde::{Serialize, Deserialize};
 use bincode::{serialize, deserialize};
+use qrcode::QrCode;
+use image::Luma;
+use std::path::PathBuf;
+use native_dialog::FileDialog;
+extern crate ncurses;
+use ncurses::{getch, initscr, addstr, endwin, refresh, clear};
+
+const DEFAULT_SIZE:usize = 1024;
+const MAX_FILES_DIRECTORY:usize = 64;
+const NAMELEN: u32 = 64;
 
 /*
     Estructura fundamental que nos sirve para administrar los archivos
@@ -38,14 +44,8 @@ impl Disk {
         let inode_size = mem::size_of::<Vec<Inode>>() + mem::size_of::<Inode>();
         let max_files = block_size / inode_size;
 
-        let disk_path = format!("{}/.disco.qrfs", &root_path);
-        let table_path = format!("{}/.table.qrfs", &root_path);
-
         let mut memory_blocks: Vec<MemoryBlock>;
         let mut super_block: Vec<Option<Inode>>;
-
-        File::create(disk_path).expect("Error a la hora de crear el disco");
-        File::create(table_path).expect("Error a la hora de crear la tabla");
 
         super_block = Vec::new();
         memory_blocks = Vec::new();
@@ -73,7 +73,7 @@ impl Disk {
         let root_inode = Inode {
             name,
             attributes,
-            references: vec![Option::None; 64]
+            references: vec![Option::None; MAX_FILES_DIRECTORY]
         };
 
         super_block.push(Some(root_inode));
@@ -317,6 +317,15 @@ impl Disk {
     }
 
     /*
+        Función que codifica los memory_blocks
+        E: N/A
+        S: un arreglo de bytes que representa los memory blocks codificados
+    */
+    fn encode_memory_blocks(&self,) -> Vec<u8> {
+        serialize(&self.memory_blocks).unwrap()
+    }
+
+    /*
         Función que codifica un inode
         E: inode (inode a codificar)
         S: un arreglo de bytes (un inode codificado)
@@ -336,13 +345,24 @@ impl Disk {
         for inode in self.super_block.iter() {
             match inode {
                 Some(inode) => {
-                    result.push(self.encode_inode(inode));
+                    if inode.attributes.ino != 1 {
+                        result.push(self.encode_inode(inode));
+                    }
                 },
-                None => panic!("Error: no se pudo codificar los inodes")
+                None => ()
             }
         }
 
         result
+    }
+
+    /*
+        Función que decodifica los memory_blocks
+        E: un arreglo de bytes que representan los memory blocks codificado
+        S: un arreglo de MemoryBlock
+    */
+    fn decode_memory_blocks(&self, memory_blocks: &Vec<u8>) -> Vec<MemoryBlock>{
+        deserialize(&memory_blocks[..]).unwrap()
     }
 
     /*
@@ -368,9 +388,91 @@ impl Disk {
 
         result
     }
+
+    /*
+        Función que guarda los inodes y llama a la función para convertirlos en QR
+        E: N/A
+        S: N/A
+    */
+    fn save_inodes(&self) {
+        self.transform_inodes_to_qr(self.encode_inodes());
+    }
+
+    /*
+        Función que transforma los inodes codificados en QR
+        E: un arreglo de bytes que representa los inodes codificados
+        S: N/A
+    */
+    fn transform_inodes_to_qr(&self, inodes: Vec<Vec<u8>>) {
+        let mut counter = 0;
+        for inode in inodes.iter() {
+            let qr_code = QrCode::new(inode).unwrap();
+            let image_qr = qr_code.render::<Luma<u8>>().build();
+            let path = format!("/home/kzumbado/Documents/proyecto2-sistemas-operativos/qrfs/qr_codes/inode{}.png", counter);
+            image_qr.save(path);
+            counter = counter + 1;
+        }
+    }
+
+    /*
+        Función que convierte los QR a inodes
+        E: un arreglo con los paths a los archivos seleccionados por el usuario
+        S: un arreglo de opcionales de inodes (super_block)
+    */
+    fn translate_inodes_qr(&self, paths: Vec<PathBuf>) -> Vec<Option<Inode>> {
+        let mut super_block:Vec<Option<Inode>> = Vec::new();
+        for inode in paths.iter() {
+            let image_qr = image::open(inode).unwrap();
+            let gray_image = image_qr.into_luma8();
+
+            let mut decoder = quircs::Quirc::default();
+
+            let with_image = gray_image.width() as usize;
+            let height_image = gray_image.height() as usize;
+            let data = decoder.identify(with_image, height_image, &gray_image);
+
+            let mut result: Option<Vec<u8>> = Option::None;
+            for element in data {
+                let code = element.expect("Error: no se pudo identificar el QR");
+                let decoded = code.decode().expect("Error: no se pudo decodicar el QR");
+                result = Some(decoded.payload);
+            }
+
+            match result {
+                Some(result) => {
+                    let inode: Inode = self.decode_inode(&result);
+                    super_block.push(Some(inode));
+                },
+                None => panic!("Error: no se pudo transformar a Inode")
+            }
+
+        }
+
+        super_block
+    }
+
+    /*
+        Función que despliega un dialogo de selección de archivos al usuario
+        E: N/A
+        S: un arreglo con los paths a los archivos seleccionados por el usuario
+    */
+    fn display_dialog(&self) -> Vec<PathBuf> {
+        let paths = FileDialog::new()
+            .set_location("~/Documents/proyecto2-sistemas-operativos/qrfs/qr_codes")
+            .add_filter("PNG Image", &["png"])
+            .show_open_multiple_file()
+            .unwrap();
+
+        println!("El path es {:?}", paths);
+        paths
+    }
+
 }
 
-
+/*
+    Estructura de inode para guardar los datos de los archivos y carpetas
+    implementa serialize y deserialize
+*/
 #[derive(Serialize, Deserialize)]
 struct Inode {
     name: String,
@@ -379,11 +481,20 @@ struct Inode {
     references: Vec<Option<usize>>
 }
 
+/*
+    Estructura de inode para guardar los datos de los archivos y carpetas
+    implementa serialize y deserialize
+*/
 #[derive(Serialize, Deserialize)]
 struct MemoryBlock {
     data: Option<Vec<u8>>
 }
 
+/*
+    Estructura auxiliar de Timespec
+    es necesaria ya que serialize y deserialize no puede tener estructuras dentro de estructuras
+    implementa serialize y deserialize
+*/
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "Timespec")]
 pub struct TimespecDef {
@@ -391,6 +502,11 @@ pub struct TimespecDef {
     pub nsec: i32,
 }
 
+/*
+    Estructura auxiliar de FileType
+    es necesaria ya que serialize y deserialize no puede tener estructuras dentro de estructuras
+    implementa serialize y deserialize
+*/
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "FileType")]
 pub enum FileTypeDef {
@@ -403,6 +519,11 @@ pub enum FileTypeDef {
     Socket,
 }
 
+/*
+    Estructura auxiliar de FileAttr
+    es necesaria ya que serialize y deserialize no puede tener estructuras dentro de estructuras
+    implementa serialize y deserialize
+*/
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "FileAttr")]
 pub struct FileAttrDef {
@@ -441,13 +562,73 @@ impl QRFS {
         S: una estructura QRFS
     */
     fn new(root_path: String) -> Self {
-        let max_files: usize = 1024;
-        let memory_size: usize = 1024 * 1024 * 1024;
+        let max_files: usize = DEFAULT_SIZE;
+        let memory_size: usize = DEFAULT_SIZE * DEFAULT_SIZE * DEFAULT_SIZE;
         let block_size: usize = max_files * (mem::size_of::<Vec<Inode>>() + mem::size_of::<Inode>());
+        
+        initscr();
+        addstr("¿Desea seleccionar archivos previos? \nY = sí\nCualquiera = no\n");
+        
+        refresh();
+        
+        let response = getch();
+        clear();
+        endwin();
+        let mut disk = Disk::new(root_path, memory_size, block_size);
 
-        let disk = Disk::new(root_path, memory_size, block_size);
+        if response == 89 {
+            let paths = disk.display_dialog();
+            let inodes = disk.translate_inodes_qr(paths);
+
+            for inode in inodes {
+                match inode {
+                    Some(inode) => {
+                        let position = disk.find_empty_reference(1);
+                        match position {
+                            Some(pos) => {
+                                let ino = inode.attributes.ino as usize;
+                                let content: Vec<u8> = Vec::default();
+
+                                disk.write_inode(inode);
+                                disk.write_reference(1, pos, ino);
+                                disk.write_content_bytes(ino - 1, content);
+                            },
+                            None => println!("Error: fallo al inicializar el fs")
+                        }
+                    },
+                    None => panic!("Error: el inode no es válido")
+                }
+            }
+
+            println!("Exito");
+        }
 
         QRFS { disk }
+    }
+}
+
+impl Drop for QRFS {
+    /*
+        Función drop del filesystem
+        
+        sirve para guardar los archivos en caso de que el usuario desee hacerlo
+    */
+    fn drop(&mut self) {
+
+        initscr();
+        addstr("¿Desea guardar los archivos? \nY = sí\nCualquiera = no\n");
+        
+        refresh();
+        
+        let response = getch();
+        
+        endwin();
+        
+        if response == 89 {
+            println!("\nGuardando inodes");
+            &self.disk.save_inodes();
+            println!("Guardados correctamente\n");
+        }
     }
 }
 
@@ -592,7 +773,7 @@ impl Filesystem for QRFS {
                         let inode = Inode {
                             name,
                             attributes,
-                            references: vec![Option::None; 64]
+                            references: vec![Option::None; MAX_FILES_DIRECTORY]
                         };
 
                         self.disk.write_inode(inode);
@@ -660,7 +841,7 @@ impl Filesystem for QRFS {
         let mut inode = Inode {
             name,
             attributes,
-            references: vec![Option::None; 64]
+            references: vec![Option::None; MAX_FILES_DIRECTORY]
         };
 
         inode.references[0] = Some(memory_block);
@@ -752,9 +933,9 @@ impl Filesystem for QRFS {
         let bavail = bfree;
         let bsize = self.disk.block_size;
         let files = self.disk.find_empty_memory_block().unwrap();
-        let namelen = 64;
+        let namelen = NAMELEN;
         let ffree = self.disk.max_files - files;
-        let frsize = 1;
+        let frsize = blocks as u32;
 
         reply.statfs(
             blocks as u64, 
@@ -812,7 +993,7 @@ impl Filesystem for QRFS {
         sirve para sincronizar los archivos del fs
     */
     fn fsync(&mut self, _req: &Request, _ino: u64, _fh: u64, _datasync: bool, reply: ReplyEmpty) {
-        println!("Operation: fsync)");
+        println!("Operation: fsync");
         reply.error(ENOSYS);
     }
 

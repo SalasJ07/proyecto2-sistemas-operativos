@@ -1,0 +1,13 @@
+/home/kzumbado/Documents/proyecto2-sistemas-operativos/qrfs/target/debug/deps/stretch-fc6f1b759a20a631.rmeta: /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/lib.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/geometry.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/node.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/number.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/result.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/style.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/algo.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/forest.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/id.rs
+
+/home/kzumbado/Documents/proyecto2-sistemas-operativos/qrfs/target/debug/deps/stretch-fc6f1b759a20a631.d: /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/lib.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/geometry.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/node.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/number.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/result.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/style.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/algo.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/forest.rs /home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/id.rs
+
+/home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/lib.rs:
+/home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/geometry.rs:
+/home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/node.rs:
+/home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/number.rs:
+/home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/result.rs:
+/home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/style.rs:
+/home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/algo.rs:
+/home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/forest.rs:
+/home/kzumbado/.cargo/registry/src/github.com-1ecc6299db9ec823/stretch-0.3.2/src/id.rs:
